@@ -127,24 +127,24 @@ static int fb_notifier_callback(struct notifier_block *self,
 		blank = evdata->data;
 		switch (*blank) {
 			case FB_BLANK_UNBLANK:
-		        mutex_lock(&fsync_mutex);
-			    suspend_active = false;
-
-			    if (dyn_fsync_active) 
-		 	    {
-				    dyn_fsync_force_flush();
-			    }
-			
-			    mutex_unlock(&fsync_mutex);
+				mutex_lock(&fsync_mutex);
+				suspend_active = false;
+				mutex_unlock(&fsync_mutex);
 			break;
 
 			case FB_BLANK_POWERDOWN:
 			case FB_BLANK_HSYNC_SUSPEND:
 			case FB_BLANK_VSYNC_SUSPEND:
 			case FB_BLANK_NORMAL:
-				mutex_lock(&fsync_mutex);
-			    suspend_active = true;
-			    mutex_unlock(&fsync_mutex);
+            	mutex_lock(&fsync_mutex);
+				suspend_active = true;
+
+				if (dyn_fsync_active) 
+		 		{
+					dyn_fsync_force_flush();
+				}
+			
+				mutex_unlock(&fsync_mutex);
             break;
 
             default:
