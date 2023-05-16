@@ -11,6 +11,7 @@
 #include <linux/kobject.h>
 #include <linux/sysfs.h>
 #include <linux/mutex.h>
+#include <linux/notifier.h>
 #include <linux/reboot.h>
 #include <linux/writeback.h>
 #include <linux/dyn_sync_cntrl.h>
@@ -22,10 +23,10 @@ static DEFINE_MUTEX(fsync_mutex);
 
 // Declarations
 
-bool suspend_active = false;
-bool dyn_fsync_active = DYN_FSYNC_ACTIVE_DEFAULT;
+bool suspend_active __read_mostly = false;
+bool dyn_fsync_active __read_mostly = DYN_FSYNC_ACTIVE_DEFAULT;
 
-static struct notifier_block fb_notifier;
+struct notifier_block fb_notif;
 
 extern void sync_filesystems(int wait);
 
@@ -61,9 +62,6 @@ static ssize_t dyn_fsync_active_store(struct kobject *kobj,
 		{
 			pr_info("%s: dynamic fsync disabled\n", __FUNCTION__);
 			dyn_fsync_active = false;
-
-			// force a flush
-			dyn_fsync_force_flush();
 		}
 		else
 			pr_info("%s: bad value: %u\n", __FUNCTION__, data);
@@ -106,50 +104,38 @@ static int dyn_fsync_panic_event(struct notifier_block *this,
 static int dyn_fsync_notify_sys(struct notifier_block *this, unsigned long code,
 				void *unused)
 {
-	if (code == SYS_DOWN || code == SYS_HALT || code == SYS_POWER_OFF)
+	if (code == SYS_DOWN || code == SYS_HALT)
 	{
-		// system shutdown or reboot, disable dynamic fsync and force flush
 		suspend_active = false;
-		dyn_fsync_active = false;
 		dyn_fsync_force_flush();
 		pr_warn("dynamic fsync: reboot - force flush!\n");
 	}
 	return NOTIFY_DONE;
 }
 
-static int fb_notifier_callback(struct notifier_block *self,
-				             unsigned long event, void *data)
+static int fb_notifier_cb(struct notifier_block *nb, unsigned long action,
+			  void *data)
 {
-	struct fb_event *evdata = data;
-	int *blank;
+	int *blank = ((struct fb_event *)data)->data;
 
-	if (evdata && evdata->data && event == FB_EVENT_BLANK) {
-		blank = evdata->data;
-		switch (*blank) {
-			case FB_BLANK_UNBLANK:
-				mutex_lock(&fsync_mutex);
-				suspend_active = false;
-				mutex_unlock(&fsync_mutex);
-			break;
+	/* Parse framebuffer blank events as soon as they occur */
+	if (action != FB_EARLY_EVENT_BLANK)
+		return NOTIFY_OK;
 
-			case FB_BLANK_POWERDOWN:
-			case FB_BLANK_HSYNC_SUSPEND:
-			case FB_BLANK_VSYNC_SUSPEND:
-			case FB_BLANK_NORMAL:
-            	mutex_lock(&fsync_mutex);
-				suspend_active = true;
+	if (*blank == FB_BLANK_UNBLANK) {
+		mutex_lock(&fsync_mutex);
+		suspend_active = true;
+		mutex_unlock(&fsync_mutex);
+	} else {
+		mutex_lock(&fsync_mutex);
+		suspend_active = false;
 
-				if (dyn_fsync_active) 
-		 		{
-					dyn_fsync_force_flush();
-				}
-			
-				mutex_unlock(&fsync_mutex);
-            break;
-
-            default:
-                break;
+		if (dyn_fsync_active) 
+		{
+			dyn_fsync_force_flush();
 		}
+
+		mutex_unlock(&fsync_mutex);
 	}
 
 	return 0;
@@ -163,7 +149,7 @@ static struct notifier_block dyn_fsync_notifier =
 };
 
 static struct kobj_attribute dyn_fsync_active_attribute = 
-	__ATTR(Dyn_fsync_active, 0664,
+	__ATTR(Dyn_fsync_active, 0660,
 		dyn_fsync_active_show,
 		dyn_fsync_active_store);
 
@@ -200,9 +186,10 @@ static struct kobject *dyn_fsync_kobj;
 static int dyn_fsync_init(void)
 {
 	int sysfs_result;
+	int ret;
 
 	register_reboot_notifier(&dyn_fsync_notifier);
-	
+
 	atomic_notifier_chain_register(&panic_notifier_list,
 		&dyn_fsync_panic_block);
 
@@ -217,16 +204,17 @@ static int dyn_fsync_init(void)
 	sysfs_result = sysfs_create_group(dyn_fsync_kobj,
 			&dyn_fsync_active_attr_group);
 
-	if (sysfs_result) 
+	if (sysfs_result)
 	{
 		pr_err("%s dyn_fsync sysfs create failed!\n", __FUNCTION__);
 		kobject_put(dyn_fsync_kobj);
 	}
 
-	fb_notifier.notifier_call = fb_notifier_callback;
-	if (fb_register_client(&fb_notifier) != 0) 
+	fb_notif.notifier_call = fb_notifier_cb;
+	ret = fb_register_client(&fb_notif);
+	if (ret) 
 	{
-		pr_err("%s: Failed to register lcd callback\n", __func__);
+		pr_err("%s: Failed to register msm_drm_notifier callback\n", __func__);
 
 		unregister_reboot_notifier(&dyn_fsync_notifier);
 
@@ -254,14 +242,15 @@ static void dyn_fsync_exit(void)
 
 	if (dyn_fsync_kobj != NULL)
 		kobject_put(dyn_fsync_kobj);
-	
-	fb_unregister_client(&fb_notifier);
-		
+
+	fb_unregister_client(&fb_notif);
+
 	pr_info("%s dynamic fsync unregistration complete\n", __FUNCTION__);
 }
 
 module_init(dyn_fsync_init);
 module_exit(dyn_fsync_exit);
 
-MODULE_DESCRIPTION("dynamic fsync - automatic fs sync optimization for msm8953");
+MODULE_AUTHOR("andip71");
+MODULE_DESCRIPTION("dynamic fsync - automatic fs sync optimization for msm8937");
 MODULE_LICENSE("GPL v2");
